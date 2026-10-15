@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video Call App</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: sans-serif; margin: 0; background: #f2f2f2; }
+  #join { max-width: 360px; margin: 80px auto; background: #fff; padding: 24px; border-radius: 12px; }
+  #join input, #join button { width: 100%; padding: 12px; margin-top: 10px; font-size: 16px; }
+  #app { display: none; max-width: 700px; margin: 0 auto; padding: 10px; }
+  #videos { display: none; gap: 8px; margin-bottom: 10px; }
+  #videos video { width: 50%; background: #000; border-radius: 8px; }
+  #messages { height: 300px; overflow-y: auto; background: #fff; border-radius: 8px; padding: 10px; }
+  .msg { margin: 6px 0; }
+  .sys { color: #888; font-style: italic; }
+  .msg img, .msg video { max-width: 220px; display: block; margin-top: 4px; }
+  .controls { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  .controls input[type=text] { flex: 1; padding: 10px; font-size: 16px; min-width: 120px; }
+  button { padding: 10px 14px; font-size: 15px; cursor: pointer; border: 0; border-radius: 8px; background: #1a73e8; color: #fff; }
+  button.red { background: #d93025; }
+  button.green { background: #188038; }
+</style>
+</head>
+<body>
+
+<div id="join">
+  <h2>Join a Room</h2>
+  <input id="nameInput" placeholder="Your name">
+  <input id="roomInput" placeholder="Room code">
+  <button id="joinBtn">Join</button>
+</div>
+
+<div id="app">
+  <div id="videos">
+    <video id="localVideo" autoplay muted playsinline></video>
+    <video id="remoteVideo" autoplay playsinline></video>
+  </div>
+
+  <div id="messages"></div>
+
+  <div class="controls">
+    <input type="text" id="msgInput" placeholder="Type a message">
+    <button id="sendBtn">Send</button>
+    <input type="file" id="fileInput" accept="image/*,video/*" style="display:none">
+    <button id="fileBtn">Photo/Video</button>
+  </div>
+
+  <div class="controls">
+    <button class="green" id="voiceBtn">Voice Call</button>
+    <button class="green" id="videoBtn">Video Call</button>
+    <button class="red" id="endBtn">End Call</button>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+  const socket = io();
+  const $ = (id) => document.getElementById(id);
+  let pc = null;
+  let localStream = null;
+  let pendingCandidates = [];
+
+  const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+  // ---------- Join room ----------
+  $('joinBtn').onclick = () => {
+    const name = $('nameInput').value.trim();
+    const roomCode = $('roomInput').value.trim();
+    if (!name || !roomCode) return alert('Please enter both name and room code');
+    socket.emit('join-room', { name, roomCode });
+    $('join').style.display = 'none';
+    $('app').style.display = 'block';
+  };
+
+  // ---------- Chat ----------
+  function addMessage(content, cls) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + (cls || '');
+    if (typeof content === 'string') div.textContent = content;
+    else div.appendChild(content);
+    $('messages').appendChild(div);
+    $('messages').scrollTop = $('messages').scrollHeight;
+  }
+
+  $('sendBtn').onclick = sendText;
+  $('msgInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendText(); });
+  function sendText() {
+    const text = $('msgInput').value.trim();
+    if (!text) return;
+    socket.emit('chat-message', text);
+    $('msgInput').value = '';
+  }
+
+  socket.on('chat-message', ({ name, message }) => addMessage(name + ': ' + message));
+  socket.on('system-message', (text) => addMessage(text, 'sys'));
+
+  // ---------- Send photo / video (small files, up to about 700KB) ----------
+  $('fileBtn').onclick = () => $('fileInput').click();
+  $('fileInput').onchange = () => {
+    const file = $('fileInput').files[0];
+    if (!file) return;
+    if (file.size > 700 * 1024) return alert('File is too large. Please choose one under 700KB');
+    const reader = new FileReader();
+    reader.onload = () => {
+      const type = file.type.startsWith('video') ? 'video' : 'image';
+      socket.emit('media-message', { url: reader.result, type });
+    };
+    reader.readAsDataURL(file);
+    $('fileInput').value = '';
+  };
+
+  socket.on('media-message', ({ name, url, type }) => {
+    if (!url.startsWith('data:')) return;
+    const wrap = document.createElement('div');
+    wrap.appendChild(document.createTextNode(name + ':'));
+    const el = document.createElement(type === 'video' ? 'video' : 'img');
+    el.src = url;
+    if (type === 'video') el.controls = true;
+    wrap.appendChild(el);
+    addMessage(wrap);
+  });
+
+  // ---------- Calls ----------
+  function createPeer() {
+    pc = new RTCPeerConnection(rtcConfig);
+    pendingCandidates = [];
+    pc.onicecandidate = (e) => {
+      if (e.candidate) socket.emit('ice-candidate', { candidate: e.candidate });
+    };
+    pc.ontrack = (e) => { $('remoteVideo').srcObject = e.streams[0]; };
+    localStream.getTracks().forEach((t) => pc.addTrack(t, localStream));
+  }
+
+  async function getMedia(callType) {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: callType === 'video'
+    });
+    $('localVideo').srcObject = localStream;
+    $('videos').style.display = 'flex';
+  }
+
+  async function startCall(callType) {
+    try {
+      await getMedia(callType);
+      createPeer();
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      socket.emit('call-user', { offer, callType });
+      addMessage('Calling...', 'sys');
+    } catch (err) {
+      alert('Camera/microphone permission was not granted: ' + err.message);
+    }
+  }
+
+  $('voiceBtn').onclick = () => startCall('audio');
+  $('videoBtn').onclick = () => startCall('video');
+
+  socket.on('call-made', async ({ offer, callType }) => {
+    if (!confirm('Incoming ' + (callType === 'video' ? 'video' : 'voice') + ' call. Answer?')) {
+      socket.emit('end-call');
+      return;
+    }
+    try {
+      await getMedia(callType);
+      createPeer();
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      for (const c of pendingCandidates) await pc.addIceCandidate(c);
+      pendingCandidates = [];
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      socket.emit('make-answer', { answer });
+    } catch (err) {
+      alert('Problem answering the call: ' + err.message);
+    }
+  });
+
+  socket.on('answer-made', async ({ answer }) => {
+    if (!pc) return;
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    for (const c of pendingCandidates) await pc.addIceCandidate(c);
+    pendingCandidates = [];
+  });
+
+  socket.on('ice-candidate', async ({ candidate }) => {
+    const c = new RTCIceCandidate(candidate);
+    if (pc && pc.remoteDescription) await pc.addIceCandidate(c);
+    else pendingCandidates.push(c);
+  });
+
+  function cleanupCall() {
+    if (pc) { pc.close(); pc = null; }
+    if (localStream) { localStream.getTracks().forEach((t) => t.stop()); localStream = null; }
+    $('localVideo').srcObject = null;
+    $('remoteVideo').srcObject = null;
+    $('videos').style.display = 'none';
+  }
+
+  $('endBtn').onclick = () => { socket.emit('end-call'); cleanupCall(); };
+  socket.on('call-ended', () => { cleanupCall(); addMessage('Call ended', 'sys'); });
+</script>
+</body>
+</html>
