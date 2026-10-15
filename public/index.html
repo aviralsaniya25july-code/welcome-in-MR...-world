@@ -198,8 +198,29 @@
     $('videos').style.display = 'none';
   }
 
-  $('endBtn').onclick = () => { socket.emit('end-call'); cleanupCall(); };
-  socket.on('call-ended', () => { cleanupCall(); addMessage('Call ended', 'sys'); });
+  function hardStopTracks() {
+  if (localStream) {
+    localStream.getTracks().forEach((t) => { t.stop(); t.enabled = false; });
+  }
+  if ($('localVideo').srcObject) {
+    $('localVideo').srcObject.getTracks().forEach((t) => t.stop());
+  }
+  if ($('remoteVideo').srcObject) {
+    $('remoteVideo').srcObject.getTracks().forEach((t) => t.stop());
+  }
+}
+
+$('endBtn').onclick = () => {
+  hardStopTracks();
+  socket.emit('end-call');
+  cleanupCall();
+};
+
+socket.on('call-ended', () => {
+  hardStopTracks();
+  cleanupCall();
+  addMessage('Call ended', 'sys');
+});
 </script>
 </body>
 </html>
